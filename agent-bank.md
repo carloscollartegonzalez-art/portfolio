@@ -6,8 +6,8 @@
 
 An app for agents. We host one connector that any agent can plug into (MCP + REST). Through it, a person's agent can
 discover UK savings products with every condition, get the person's choice, open the account in the person's name
-using our KYA, fund it by instructing a payment from the person's own bank, and keep them informed afterwards.
-We never hold customer money.
+using our KYA, fund it by instructing a payment from the person's own bank, switch it to a better one later, and keep
+them informed throughout. We never hold customer money.
 
 First market: **UK**. First products: **savings** (investments later). First agents: **phone agents** (e.g. Muse, Instinct) [CHECK integration].
 
@@ -17,115 +17,75 @@ Status labels in /docs:
 - **NEEDS PROOF** – must be tested with users, providers, partners or counsel
 - **[CHECK]** – a fact not yet verified
 
-## What is BUILT (28 Sep 2026)
-**KYA core v0.1** – 46 passing tests. Mock identity provider; no real money yet. **Now has a real network server** (see below) -- no longer CLI-only.
+## What is BUILT (29 Sep 2026)
+
+**KYA core v1** – the identity/authorization layer, and now a real, deployable server around it. 135 passing tests. Mock identity provider; no real money yet.
 
 Three things, kept separate in code and in every audit entry (docs/11 "who holds what", docs/12 "assurance levels"):
-1. **Customer identity** – a verified person: IDV + a real WebAuthn passkey (`src/webauthn/rp.ts`; private key never leaves a simulated secure enclave, `src/webauthn/mockAuthenticator.ts`, the same way `idv/mock.ts` stands in for a real identity provider). Every customer approval (mandate, revoke, limit change) is a genuine CBOR-encoded, EdDSA-signed WebAuthn assertion challenged with a hash of exactly what's being approved, with signature-counter clone detection.
-2. **Agent identity** – agent key + operator attestation (`signed`), or an OAuth client (`oauth_dpop`: sender-constrained, proves possession of its own registered key on every call, same assurance as `signed`; `oauth_bearer`: presents a bearer credential with no per-call proof at all, weakest). Every session/mandate is tagged with its assurance level.
+1. **Customer identity** – a verified person: IDV + a real WebAuthn passkey; private key never leaves a simulated secure enclave. Every customer approval (mandate, revoke, limit change) is a genuine CBOR-encoded, EdDSA-signed WebAuthn assertion challenged with a hash of exactly what's being approved, with signature-counter clone detection.
+2. **Agent identity** – agent key + operator attestation (`signed`), or an OAuth client (`oauth_dpop`: sender-constrained, proves possession of its own registered key on every call; `oauth_bearer`: presents a bearer credential with no per-call proof at all, weakest). **Real RFC 9449 DPoP-over-HTTP** now backs this at the transport layer too — no pre-registration, a client embeds its public key fresh in every proof, bound at token issuance and verified per-request, interop-checked against the real MCP SDK client's own proof format.
 3. **Delegated authority** – the mandate: scopes, limits, expiry, revocation, checked live on every call regardless of which agent-identity mode issued it.
 
 What this buys:
-- Operator (agent platform) registration; agent keys must be attested by their operator. OAuth clients (`registerOAuthClient`) register directly with either a DPoP key or get a one-time client secret.
-- `oauth_bearer` gets lower default limits (£100/payment, £250/month vs. £500/£500 for `signed`/`oauth_dpop`) and a step-up (`needsCustomerConfirmation: true`, payment not yet recorded) on the first payment and any new destination — the two moments a stolen bearer credential would most want to abuse.
-- **Switching agents keeps KYA certification**: a customer linking a brand-new agent/operator (one that has never seen them before) re-proves who they are with their existing passkey -- a real WebAuthn discoverable-credential assertion, verified against whichever principal actually registered that credential -- instead of redoing ID-document + selfie KYC. An earlier version of this trusted a caller-supplied principal id with no proof of possession; that's gone.
-- Agent credential: 24h EdDSA JWT bound to the agent/client identity; refresh while mandate active.
-- Every call: identity check (signature for `signed`/`oauth_dpop`, credential alone for `oauth_bearer`), scope, own-name destination, per-payment and monthly limits, and a **required, non-empty `reason`** on `pay` and `apply` (this codebase's `open_account` -- applying for a savings product is opening it).
-- Every allowed/denied action logs `principalId`, `operatorId`/`oauthClientId`, agent thumbprint, `mandateId`, the `scope` and `limits` in effect, and `assuranceLevel` -- see `authorize()`'s `identifyCaller()` split in `src/kya/service.ts`.
-- Customer: change limits, revoke; operator/OAuth-client suspension revokes all its agents; agent can revoke itself, never widen.
-- Hash-chained audit log; Supabase schema in `supabase/migrations/0001_kya.sql`.
-- **The issuer's private key -- the one that signs every agent credential -- is never stored in the clear.** AES-256-GCM envelope encryption (`src/kya/keyProtection.ts`); the master key comes from `KYA_MASTER_KEY` (env), never from the same file/database as the ciphertext. `npm run keygen` generates a real one. The CLI auto-generates a local-dev-only key into a separate gitignored file (`.data/master.key`, never `db.json`) if none is set -- a real deployment must use a real KMS/secrets manager instead (see the file's own comment for why an env var is only the interim step).
+- Operator (agent platform) registration; OAuth clients register with either a DPoP key or a one-time client secret. `oauth_bearer` gets lower default limits and a step-up on the first payment and any new destination.
+- **Switching agents keeps KYA certification**: a customer linking a brand-new agent/operator re-proves who they are with their existing passkey — a real WebAuthn discoverable-credential assertion — instead of redoing ID-document + selfie KYC.
+- Every call: identity check, scope, own-name destination, per-payment and monthly limits, and a required, non-empty `reason` on `pay` and `open_account`.
+- Full audit trail: principal, operator/OAuth-client, agent thumbprint, mandate, scope, limits, assurance level, on every allowed *and* denied action.
+- **Real refresh-token rotation + reuse (theft) detection.** OAuth access tokens are short-lived (15 min) with a 30-day rotating refresh token; presenting an already-rotated token is the theft signal — it revokes the entire mandate, not just that token.
+- **Real, hash-chained, tamper-evident audit log**, now concurrency-safe under multiple simultaneous writers (a database-level constraint plus retry, not a lock).
+- **The issuer's private key is never stored in the clear** (AES-256-GCM envelope encryption). The master key comes from an env var by default, or — when Supabase is configured — is bootstrapped and stored encrypted in **Supabase Vault**, one shared value across every server instance instead of copying a secret into each environment by hand.
+- **Real Supabase-backed storage**: a live Postgres project, 9 tables, row-level security on with no public policies — the service-role key is the only key that can read or write anything, and it has never once been retrieved or handled by the agent doing this work, by design.
+- **A real shared KV store** for every remaining piece of transport-layer state (OAuth codes, DPoP replay tracking, refresh tokens, choice sessions) — real atomicity from the database, not from being single-process. No new Redis/Upstash account needed; it reuses the same Supabase project.
 
-## The connector server (docs/12), first increment
+## The connector (docs/12) — the discover → choose → verify → open → switch loop, real end to end
 
-`npm run server` starts a real Hono server (`src/server/`) with a working, tested, end-to-end
-OAuth + MCP stack for **oauth_bearer** clients (the realistic default for "any MCP client that
-just showed up" -- dynamically-registered clients get bearer credentials, matching docs/12's own
-table). `oauth_dpop`/`signed` stay reachable via the CLI/SDK-integration path for now, not this
-HTTP flow -- see the honest gap below.
+`npm run server` starts a real Hono server with a working, tested OAuth + MCP stack. The full customer journey now works over real HTTP, not just at the identity layer:
 
-- **Real RFC 9728/8414 discovery**: an unauthenticated `/mcp` call gets a `401` with a correct
-  `WWW-Authenticate` challenge pointing at Protected Resource Metadata, which points at
-  Authorization Server Metadata (`GET /.well-known/oauth-protected-resource/mcp`,
-  `GET /.well-known/oauth-authorization-server`) -- both served by the SDK's own spec-correct
-  helper (`oauthMetadataResponse`), not hand-rolled.
-- **Real RFC 7591 dynamic client registration** (`POST /oauth/register`) -- any MCP client (Claude,
-  ChatGPT) can register itself and get a `client_id`/`client_secret`, mapped straight onto
-  `registerOAuthClient`.
-- **Real OAuth 2.1 authorization_code + PKCE flow** (`GET /oauth/authorize`, `POST /oauth/token`).
-  `/oauth/authorize` *is* the KYA onboarding flow itself (docs/12's own framing) -- a real,
-  server-rendered page doing real `@simplewebauthn/browser` WebAuthn ceremonies (returning-customer
-  passkey sign-in, or identity-check + new passkey, then a consent screen showing the actual
-  proposed scopes/limits), not a stand-in. The `code_verifier`/`code_challenge` (S256), single-use
-  authorization codes, and `client_secret_post` client auth are all real and tested, including the
-  negative cases (wrong secret, wrong PKCE verifier, code replay).
-- **A real MCP Resource Server at `/mcp`** (`@modelcontextprotocol/server`'s `createMcpHandler` +
-  `requireBearerAuth`), with three tools that exercise the full safety chain end to end:
-  `get_kya`, `pay` (reason required, oauth_bearer step-up, own-name + limit checks all live),
-  `revoke_access`. Verified over the real MCP JSON-RPC protocol (`initialize` + `tools/call`), not
-  just at the `KyaService` layer.
-- `test/server.test.ts` drives the entire thing through Hono's own request/response contract --
-  register a client, complete the real WebAuthn ceremonies (via the same `CustomerDevice` used
-  everywhere else in this suite), exchange the code for a token, call an MCP tool -- no shortcuts
-  taken to make the test pass.
+- **Discover, anonymously**: `list_products` / `get_product` / `compare_products` over a mock catalogue of 12 UK savings products spanning all five product types. Ranking is one published, fixed method (best AER first) that never reads whether a provider pays us — verified by flipping that flag mid-test and checking the order doesn't move. Live on a separate, unauthenticated `/mcp/public` endpoint, since browsing needs no identity at all.
+- **Choose, on our own page — never the agent**: `present_choice` returns a link, not a way to confirm it. Confirmation only happens on a real hosted page, gated by a cookie + matching hidden field, so an agent holding only the link it was given can't complete the step itself. Confirming mints a real signed receipt, cryptographically distinct from an agent credential.
+- **Verify**: the real OAuth + WebAuthn KYA flow described above.
+- **Open**: `open_account` spends that receipt — rejecting it outright if it's missing, tampered, issued against a product version that's since changed, or already used once. A denial for an unrelated reason (e.g. a missing mandate scope) never burns a good, unused receipt — validated before consumed, the same ordering lesson learned from refresh-token rotation.
+- **Switch**: `rollover` moves an existing holding to a different product through the identical receipt-gated flow — no separate trust model for "changing your mind" versus "opening the first one." The old holding is marked, not deleted, so its history stays visible.
+- **Stay informed**: `get_events` / `ack_event` / `register_agent_webhook` — every event is a real, independently-verifiable signed JWS. Opening or switching an account emits a real one automatically. Webhook registration sends a real signed test event and stays unverified until that specific event is acknowledged, matching the intended "linking completes only after a test event is acked" behaviour. Delivery is fire-and-forget — a dead endpoint never affects anyone else's delivery.
 
-**Honest gaps in this first server increment** (not silently skipped, tracked):
-- **No real RFC 9449 DPoP header parsing at the HTTP layer yet.** `oauth_dpop`'s per-call
-  proof-of-possession is fully real and tested at the `KyaService.authorize()` level (reused
-  directly from `signed` mode's own mechanism) but isn't wired into the MCP bearer-auth gate over
-  HTTP yet -- a real DPoP-sending client can't yet get sender-constrained assurance through this
-  server. `oauth_dpop` remains usable via the CLI/SDK path (`AgentClient.oauthDpop`).
-  `verifyCredential`'s own comment in `src/kya/service.ts` names this explicitly.
-- No product catalogue, choice/receipt system, or events -- docs/12's full v0.1 tool list
-  (`list_products`, `open_account`, `get_events`, etc.) needs a data model this pass doesn't build.
-  `get_kya`/`pay`/`revoke_access` prove the auth + safety chain, not the product surface.
-- Still `FileStore` (local JSON), still an in-process auth-code/nonce store -- both fine for one
-  process, not yet for more than one (see below).
-- Still no real identity provider, still no real payments.
+**Honest gaps, tracked, not hidden:**
+- No browse-only scope tier yet (every session goes through full KYA today) and no real open-banking payments.
+- Live MCP session notifications and email/push escalation for an unacknowledged event both need capabilities this pass doesn't build (the second needs a real email/push provider — the same kind of external-account gap as the identity provider itself).
+- **Standing instructions** — a customer pre-authorizing a specific rule in advance ("if a better ISA rate appears, just move it, tell me after") so the system executes without asking each time — are designed (see below) but not built.
+- No real identity provider or real KMS yet — both need signing up with an external service, a decision that isn't purely technical.
 
-Not built: real identity provider, Supabase store, product catalogue, payments. **Also not solved
-yet:** the replay-nonce store, and now also the OAuth authorization-code store, are single-process
-(in-memory/file) -- safe today because there's only one process, but both would need a shared
-store (Redis-class) before this could run as more than one instance.
+## Autonomy, decided deliberately: how much the system executes without asking
+
+A short design note worth surfacing on its own, since it's a real product/regulatory decision, not just an engineering one. Three tiers:
+
+1. **Facts, never a recommendation** — an internal monitor watches holdings and the market and reports facts (rate changes, maturities, FSCS exposure), never suggesting or acting. Designed, not yet built.
+2. **Propose, confirm every time** — what's built above: an agent (or the system itself) proposes a move, nothing executes until the customer confirms on our own page.
+3. **A standing instruction, stated once** — the customer writes the exact rule themselves in advance; the system only ever matches that literal rule and executes it without asking again, then notifies. This is real consent, just given once instead of per-instance — not the system deciding anything.
+
+Explicitly **not** built, and flagged rather than quietly attempted: an internal agent that decides, from an open-ended goal rather than a rule the customer wrote word-for-word, what to do and executes it. That crosses into discretionary-management/advice territory, a different regulatory category from everything else here, and needs a legal read before any design work starts — the same posture every `[CHECK counsel]` item in this project's docs already takes.
+
+## Real market data: moving off the mock catalogue
+
+Started sourcing real UK savings rates, deliberately small and low-risk rather than scraping the whole market at once. Rejected aggregators (MoneySavingExpert, Moneyfacts, Raisin) outright as scrape *targets* — they compile other providers' rates into a curated database, carrying real legal exposure (their own terms almost always prohibit it, and UK database right protects a compiled dataset separately from copyright) that a primary source doesn't. MoneySavingExpert's best-buy table WAS used once, by hand, purely as a lookup for who currently ranks well — the same way a human analyst would casually check before going to primary sources; nothing from it is stored or reproduced.
+
+**Seven providers now real and live** (Chip, Atom Bank, Tandem Bank, Charter Savings Bank, Cynergy Bank, Oxbury Bank, NS&I) — each checked by hand, per provider, before writing a line of scraper code: `robots.txt`, website terms for an anti-scraping clause, and page structure. Five more candidates were checked and rejected: two actively blocked the very first request (a CAPTCHA wall; a Cloudflare block page), one's `robots.txt` explicitly names and blocks Node's own fetch stack, one turned out to be a parked domain rather than a real bank, one failed to connect at all. All treated as hard stops, not obstacles to route around — the clearest signal a site owner can give, clearer than any terms-of-service clause. One more candidate passed the technical checks but has a stricter website-reuse clause than the others; deferred rather than built against with the same confidence.
+
+A one-command script pulls real, live rates from all seven right now. One scraper parses real `schema.org` structured data rather than marketing prose — data a site publishes specifically so automated systems can read it correctly, the strongest signal found. Deliberately **not yet wired into the catalogue or any agent tool** — what's scraped today is a much thinner record (provider, product name, rate, source, timestamp) than the full product schema the catalogue needs; mapping one into the other, and handling the couple of page shapes (multi-term rate ladders, balance-tiered rates) this first pass didn't, is the next piece of work.
 
 ## Run it (Node 20+)
 ```bash
 cd ~/bank
 npm install
-npm test            # 43 tests: attacks, agent-switching, OAuth modes, step-up, acceptance test 7a, key protection
-npm run demo        # scripted walkthrough with attacks (auto-generates a local-dev master key)
-npm run keygen      # generate a real KYA_MASTER_KEY for an actual deployment (prints, writes nothing)
-npm run kya         # list step-by-step commands (state kept in .data/)
-npm run kya -- reset
-npm run kya -- operator:add Muse
-npm run kya -- agent:link Muse
-npm run kya -- customer:verify "Jane Doe" 1990-04-02 "1 High St, London E1 1AA"
-npm run kya -- customer:approve --monthly 500
-npm run kya -- agent:pay 300 "Jane Doe" --reason "customer asked to move savings"
-npm run kya -- agent:pay 100 "Mallory" --reason "test"      # denied: not the customer's account
-npm run kya -- customer:revoke
-npm run kya -- audit
-
-# OAuth mode (docs/12), plain bearer -- lower limits + step-up:
-npm run kya -- reset
-npm run kya -- oauth:add-secret ChatGPTConnector
-npm run kya -- agent:link-oauth-bearer ChatGPTConnector
-npm run kya -- customer:verify "Jane Doe" 1990-04-02 "1 High St, London E1 1AA"
-npm run kya -- customer:approve            # £100/£250 limits, not £500/£500
-npm run kya -- agent:pay 50 "Jane Doe" --reason "first purchase"   # allowed, but customer must still confirm
+npm test                # 135 tests: attacks, agent-switching, OAuth modes, step-up, key protection,
+                         # DPoP-over-HTTP, refresh-token rotation, audit-log concurrency, shared KV store,
+                         # Vault master-key bootstrap, product catalogue, choice/receipts, open_account,
+                         # rollover/get_holdings, events/webhooks, real-provider scrapers
+npm run demo             # scripted KYA walkthrough with attacks (auto-generates a local-dev master key)
+npm run demo:connector   # scripted walkthrough of the full discover -> choose -> verify -> open -> switch
+                         # loop, over the real HTTP/MCP stack, no shortcuts
+npm run scrape:rates     # real, live UK savings rates from seven providers' own pages
+npm run server           # http://127.0.0.1:8787
 ```
-
-## Run the server
-```bash
-npm run server      # http://127.0.0.1:8787 -- auto-generates a local-dev master key, same as the CLI
-curl http://127.0.0.1:8787/health
-curl http://127.0.0.1:8787/.well-known/oauth-authorization-server
-curl -i -X POST http://127.0.0.1:8787/mcp    # 401 + WWW-Authenticate, discoverable from there
-```
-For the actual authorize flow you need a real MCP client (or `test/server.test.ts`, which drives
-it end to end); `BASE_URL` and `PORT` are configurable env vars, per docs/12.
-
-
 
 | Doc | What |
 |---|---|
@@ -141,6 +101,7 @@ it end to end); `BASE_URL` and `PORT` are configurable env vars, per docs/12.
 | docs/10-kyc-kya.md | UK KYC requirements, agent identity landscape, our KYA design |
 | docs/11-kya-flow.md | KYA v1: who holds what, customer flow, agent linking, recovery |
 | docs/12-connector-spec.md | Build spec: HTTP + MCP connector, OAuth mode + signed mode |
-| docs/13-monitor.md | Monitoring concept: facts (not recommendations) sent to the customer's agent |
+| docs/13-monitor.md | Internal monitor: facts (not recommendations) sent to the customer's agent |
+| docs/14-autonomy-tiers.md | How much the system decides vs. executes -- facts, propose-and-confirm, standing instructions, and the open (not decided) question of goal-based autonomy |
+| docs/15-real-rate-sourcing.md | Why providers' own pages, not aggregators -- the legal reasoning and what's scraped so far |
 | docs/archive-v0/ | Earlier "mandate wallet" framing, superseded |
-
