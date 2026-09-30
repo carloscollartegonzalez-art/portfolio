@@ -11,6 +11,11 @@ them informed throughout. We never hold customer money.
 
 First market: **UK**. First products: **savings** (investments later). First agents: **phone agents** (e.g. Muse, Instinct) [CHECK integration].
 
+Investments are a real roadmap item, not a live one -- savings was chosen first specifically
+because deposit-taking sidesteps investment-advice regulation, a shortcut investments don't get.
+Not in the catalogue, no design work started, blocked on a proper regulatory read before anything
+gets built.
+
 Status labels in /docs:
 - **BUILT** – exists in the private source repo with a passing test
 - **PROPOSAL** – our design, not built or validated
