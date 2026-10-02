@@ -24,7 +24,7 @@ Status labels in /docs:
 
 ## What is BUILT (30 Sep 2026)
 
-**KYA core v1** – the identity/authorization layer, and a real, deployable connector server around it. 236 passing tests. Mock identity provider; no real money yet.
+**KYA core v1** – the identity/authorization layer, and a real, deployable connector server around it. 295 passing tests. Mock identity provider by default; a real Didit sandbox integration exists but isn't switched on. No real money yet.
 
 Three things, kept separate in code and in every audit entry (docs/11 "who holds what", docs/12 "assurance levels"):
 1. **Customer identity** – a verified person: IDV + a real WebAuthn passkey; private key never leaves a simulated secure enclave. Every customer approval (mandate, revoke, limit change, a standing instruction) is a genuine CBOR-encoded, EdDSA-signed WebAuthn assertion challenged with a hash of exactly what's being approved, with signature-counter clone detection.
@@ -46,10 +46,13 @@ What this buys: real refresh-token rotation with reuse (theft) detection revokin
 - **Withdraw**: `request_withdrawal` takes money out of an account entirely, once the product's own terms actually allow it (easy access, a matured fixed term, or an early-closure penalty the customer accepts) — a real WebAuthn approval, since money is leaving, not arriving.
 - **Transfer an ISA, in either direction**: a real UK ISA transfer, not a withdraw-and-redeposit — money never leaves the ISA tax wrapper, and doesn't use fresh annual allowance. Transferring in captures the old provider's name and how much of it was subscribed this tax year (the only honest way the system learns about ISA money held elsewhere); transferring out moves an Agent Bank ISA to a named external provider. Both automatically issue a real, signed transfer-authority document — the actual paperwork, not a stub — and model the other institution's confirmation through a swappable interface, honestly mocked today since no real ISA transfer network exists to connect to yet.
 - **Automate**: a customer can describe a rule in plain language ("if a better ISA comes up, move it"); it's translated into a precise, structured trigger they explicitly approve with a real passkey ceremony, then runs itself — matched against real rates every day, executed with no per-instance confirmation, and the customer told afterwards. See "Autonomy" below for why this is the safe half of a much bigger idea.
-- **Stay informed**: `get_events`/`ack_event`/`register_agent_webhook` — every event is a real, independently-verifiable signed JWS, including automatic ones from account-opening, standing-instruction executions, and a corrected ISA allowance figure.
+- **Discover without even a full link**: a `browse`-scoped mandate — zero limits, no customer attached — gets issued at sign-in with no identity check at all. The moment it tries anything that actually needs one, it gets back a real link to verify; completing that upgrades the exact same mandate in place, so the agent's original credential just starts working, no re-issue.
+- **Stay informed**: `get_events`/`ack_event`/`register_agent_webhook` — every event is a real, independently-verifiable signed JWS, including automatic ones from account-opening, standing-instruction executions, and a corrected ISA allowance figure. A customer-set weekly cap on non-urgent ones (critical never capped), and each linked agent can filter which types/urgency levels it even wants to see.
 - **Manage**: a real customer-facing control room — sign in with the existing passkey (no agent involved at all), see every linked agent's scopes and limits, revoke one or change its limits, and a live ISA-allowance widget for the tax year, each its own real approval ceremony where money moves. The first screen in this project built for the customer directly rather than for an agent or for onboarding.
 
-**Honest gaps, tracked, not hidden:** no browse-only scope tier yet (every session goes through full KYA); no real open-banking payments, so a withdrawal or transfer's actual payout is mocked; no real ISA transfer network to send the (real, signed) transfer paperwork to; no real identity provider or real KMS (both need signing up with an external service); live MCP session notifications and email/push escalation for events both need capabilities not built yet.
+**Honest gaps, tracked, not hidden:** no real open-banking payments, so a withdrawal or transfer's actual payout is mocked; no real ISA transfer network to send the (real, signed) transfer paperwork to; no real KMS (needs a cloud account); a real identity-provider integration (Didit) exists but isn't DVS-registered, so it stays sandbox/demo only until that's resolved; live MCP session notifications and email/push escalation for events both need capabilities not built yet.
+
+**A security note worth including precisely because it's the boring, honest kind**: adding the lightweight "browse" tier above meant a mandate could now exist with no customer attached — a genuinely new shape, worth a dedicated re-read of the authorization code once it landed rather than trusting the tests alone. That re-read found one real bug (an edge case where an agent could end up stuck pointing at an old, weaker credential instead of a new fuller one — never a security exposure, since the stuck state was always the *more* restrictive one, but a real dead end), fixed in the same pass with a test that fails without the fix and passes with it. Treating "I built it and the tests pass" and "I went back and tried to break it" as two different steps, not one, is the posture this whole project has tried to hold to.
 
 ## Autonomy, decided deliberately — and now the safe half is real
 
@@ -95,7 +98,7 @@ Started sourcing real UK savings rates, deliberately small and low-risk rather t
 ```bash
 cd ~/bank
 npm install
-npm test                 # 236 tests
+npm test                 # 295 tests
 npm run build && npm run start  # real production build (tsc, not a dev-time TS runner)
 npm run demo              # scripted KYA walkthrough with attacks
 npm run demo:connector    # discover -> choose -> verify -> open -> switch, over the real HTTP/MCP stack
