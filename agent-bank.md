@@ -24,7 +24,7 @@ Status labels in /docs:
 
 ## What is BUILT (30 Sep 2026)
 
-**KYA core v1** – the identity/authorization layer, and a real, deployable connector server around it. 295 passing tests. Mock identity provider by default; a real Didit sandbox integration exists but isn't switched on. No real money yet.
+**KYA core v1** – the identity/authorization layer, and a real, deployable connector server around it. 300 passing tests. Mock identity provider by default; a real Didit sandbox integration exists but isn't switched on. No real money yet.
 
 Three things, kept separate in code and in every audit entry (docs/11 "who holds what", docs/12 "assurance levels"):
 1. **Customer identity** – a verified person: IDV + a real WebAuthn passkey; private key never leaves a simulated secure enclave. Every customer approval (mandate, revoke, limit change, a standing instruction) is a genuine CBOR-encoded, EdDSA-signed WebAuthn assertion challenged with a hash of exactly what's being approved, with signature-counter clone detection.
@@ -42,7 +42,7 @@ What this buys: real refresh-token rotation with reuse (theft) detection revokin
 - **Verify**: the real OAuth + WebAuthn KYA flow above.
 - **Open**: `open_account` spends that receipt, rejecting it outright if missing, tampered, stale-versioned, or already used.
 - **Fund**: `set_funding` sets up how an account gets paid into — one-off or standing — on the same "agent prepares, customer authorizes on our own page" pattern. Real open banking isn't built yet, so only the actual bank connection is mocked; the consent state machine is real.
-- **Switch**: `rollover` moves a holding to a different product through the same receipt-gated flow as opening one.
+- **Switch, instantly when it genuinely can be**: `rollover` moves a holding to a different product through the same receipt-gated flow as opening one. Between two easy-access products specifically, it now resolves the moment a same-day payment rail confirms — no artificial wait, because there's no notice period or lock-in to respect. Everything else (a notice account, a fixed term before maturity, an ISA) keeps the slower path on purpose: making THAT feel instant too would mean fronting the customer's money ourselves, a real credit-risk decision for a banking partner and counsel, not an engineering one — recorded as a real future item, not attempted quietly.
 - **Withdraw**: `request_withdrawal` takes money out of an account entirely, once the product's own terms actually allow it (easy access, a matured fixed term, or an early-closure penalty the customer accepts) — a real WebAuthn approval, since money is leaving, not arriving.
 - **Transfer an ISA, in either direction**: a real UK ISA transfer, not a withdraw-and-redeposit — money never leaves the ISA tax wrapper, and doesn't use fresh annual allowance. Transferring in captures the old provider's name and how much of it was subscribed this tax year (the only honest way the system learns about ISA money held elsewhere); transferring out moves an Agent Bank ISA to a named external provider. Both automatically issue a real, signed transfer-authority document — the actual paperwork, not a stub — and model the other institution's confirmation through a swappable interface, honestly mocked today since no real ISA transfer network exists to connect to yet.
 - **Automate**: a customer can describe a rule in plain language ("if a better ISA comes up, move it"); it's translated into a precise, structured trigger they explicitly approve with a real passkey ceremony, then runs itself — matched against real rates every day, executed with no per-instance confirmation, and the customer told afterwards. See "Autonomy" below for why this is the safe half of a much bigger idea.
@@ -98,7 +98,7 @@ Started sourcing real UK savings rates, deliberately small and low-risk rather t
 ```bash
 cd ~/bank
 npm install
-npm test                 # 295 tests
+npm test                 # 300 tests
 npm run build && npm run start  # real production build (tsc, not a dev-time TS runner)
 npm run demo              # scripted KYA walkthrough with attacks
 npm run demo:connector    # discover -> choose -> verify -> open -> switch, over the real HTTP/MCP stack
